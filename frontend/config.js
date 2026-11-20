@@ -6,7 +6,7 @@ const CONFIG = {
   badgeAddress: "0xb4ea93C12e2A3a0045f8B40957212AdE8F625ebF",
   agentIdAddress: "0x245201A41FA4849eB0D38DdE3b6490f9555599d5",
   rpcUrl: "https://data-seed-prebsc-1-s1.binance.org:8545",
-  verifierUrl: "TBD",
+  verifierUrl: "https://agentallowance-verifier-testnet.onrender.com",
   spaceIdMetadata: "https://agentid.prd.space.id/metadata/",
   // Kỳ tính điểm 18/11/2026 08:00 UTC → 09/12/2026 08:00 UTC (epoch giây).
   periodStart: 1794988800,
