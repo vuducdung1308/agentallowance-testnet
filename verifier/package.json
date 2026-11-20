@@ -1,0 +1,1 @@
+{"dependencies":{"ethers":"^6.13.0","express":"^4.21.0"},"description":"Verifier AgentAllowance: quet approval, tinh Hygiene Score, ky attestation EIP-712","name":"agentallowance-verifier","private":true,"scripts":{"check":"node --check server.js && node --check score.js && node --check test-eip712.mjs","start":"node server.js"},"type":"module","version":"0.1.0"}

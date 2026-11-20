@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentAllowance — Ví Agent của bạn có sạch không?</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+<script src="https://cdn.jsdelivr.net/npm/ethers@6.13.4/dist/ethers.umd.min.js"></script>
+<script src="config.js"></script>
+<script src="app.js" defer></script>
+</head>
+<body>
+<header>
+  <div class="logo">🛡️ AgentAllowance<small data-i18n="tagline">Kiểm soát approval cho ví Agent ID</small></div>
+  <div class="header-actions">
+    <span id="walletChip" class="wallet-chip" style="display:none"></span>
+    <button id="langToggle" class="lang-toggle" type="button">EN</button>
+    <button id="connectBtn" class="btn" type="button" data-i18n="connectWallet">Kết nối ví</button>
+  </div>
+</header>
+
+<nav aria-label="Điều hướng chính">
+  <button type="button" data-view="homeView" class="active" data-i18n="navHome">Trang chủ</button>
+  <button type="button" data-view="scanView" data-i18n="navScan">Quét ví</button>
+  <button type="button" data-view="profileView" data-i18n="navProfile">Hồ sơ</button>
+  <button type="button" data-view="leaderboardSection" data-i18n="navLeaderboard">Bảng xếp hạng</button>
+  <button type="button" data-view="statsSection" data-i18n="navStats">Thống kê</button>
+</nav>
+
+<main>
+  <div id="statusBar"></div>
+
+  <!-- ============ HOME ============ -->
+  <section id="homeView" class="view active">
+    <div class="card hero">
+      <h1 data-i18n="heroTitle">Ví Agent của bạn có sạch không?</h1>
+      <p data-i18n="heroSub">AgentAllowance quét toàn bộ token approval của ví Agent ID trên BNB Chain, chấm Hygiene Score 0–100 và cho revoke 1 click những approval rủi ro.</p>
+      <img src="assets/hero-audit.webp" alt="Kiểm toán viên cầm kính lúp soi sổ cái nối thành chuỗi khối, bên cạnh là khiên bảo vệ" data-i18n-alt="heroImgAlt" class="illustration hero-img" fetchpriority="high">
+      <p><span data-i18n="deadlineLabel">Hết kỳ nộp bài:</span> <span class="countdown" id="countdown">—</span></p>
+      <p><button id="ctaScan" class="btn" type="button" data-i18n="ctaScan">Quét ví của tôi</button></p>
+    </div>
+
+    <div class="stat-grid">
+      <div class="stat"><div class="num" id="homeAgents">—</div><div class="lbl" data-i18n="statAgents">Agent ID đã quét</div></div>
+      <div class="stat"><div class="num" id="homeApprovals">—</div><div class="lbl" data-i18n="statApprovals">Approval đã quét</div></div>
+      <div class="stat"><div class="num" id="homeRevokes">—</div><div class="lbl" data-i18n="statRevokes">Lần revoke đã xác nhận</div></div>
+    </div>
+
+    <div class="card">
+      <h2 data-i18n="howTitle">Cách hoạt động — 3 bước</h2>
+      <ol class="steps">
+        <li data-i18n="step1"><strong>Quét:</strong> verifier quét toàn bộ ERC-20 allowance của ví bạn trên BSC (chain 56), kiểm tra spender đã verify source trên BscScan chưa và lần dùng gần nhất.</li>
+        <li data-i18n="step2"><strong>Chấm điểm:</strong> Hygiene Score 0–100 theo công thức công khai. Điểm "tạm tính" chưa qua verifier; điểm "đã xác nhận" được verifier ký EIP-712 và ghi on-chain.</li>
+        <li data-i18n="step3"><strong>Revoke:</strong> bấm Revoke ở từng dòng approval rủi ro — app chỉ gửi approve(spender, 0), luôn có màn hình xác nhận của ví. Revoke xong điểm tăng lại một phần.</li>
+      </ol>
+    </div>
+
+    <div class="card">
+      <h2 data-i18n="scoreTitle">Công thức Hygiene Score</h2>
+      <p data-i18n="scoreFormula">Bắt đầu 100 điểm. Trừ 15 mỗi cờ unlimited cho spender chưa verify; trừ 10 mỗi cờ unlimited cho spender đã verify; trừ 10 mỗi cờ limited cho spender chưa verify; trừ 5 mỗi cờ stale (không dùng &gt; 90 ngày). Revoke trong kỳ được cộng lại 50% số đã trừ (làm tròn xuống): +7 / +5 / +5 / +2. Điểm tối thiểu 0, tối đa 100.</p>
+      <p data-i18n="scoreExample">Ví dụ: 1 cờ unlimited chưa verify → 85. Revoke xong → 92. Approve lại unlimited cho cùng spender → quay về 85.</p>
+      <p data-i18n="scoreBadge">Badge theo band điểm đã xác nhận: Bronze 50–69, Silver 70–89, Gold 90–100. Dưới 50 không mint mới; badge đã nhận không bị đốt khi điểm tụt.</p>
+    </div>
+
+    <div class="card">
+      <div class="warning" data-i18n="disclaimer">⚠️ Hygiene Score chỉ phản ánh trạng thái approval tại thời điểm quét, dựa trên dữ liệu công khai. Điểm này không phải bảo chứng an toàn tuyệt đối và không phải tư vấn đầu tư. AgentAllowance không hứa hẹn lợi nhuận, không phát token, không airdrop.</div>
+    </div>
+  </section>
+
+  <!-- ============ SCAN ============ -->
+  <section id="scanView" class="view">
+    <div class="card">
+      <h2 data-i18n="scanTitle">Quét approval của ví bạn</h2>
+      <p class="muted" data-i18n="scanHint">Kết nối ví trong Binance App rồi bấm "Quét lại". Chỉ quét ví đang kết nối — không có ô nhập địa chỉ hay tên để xem ví người khác.</p>
+      <div id="scanNotice"></div>
+      <p>
+        <button id="rescanBtn" class="btn" type="button" data-i18n="rescan">Quét lại</button>
+      </p>
+      <div id="estimatedScore"></div>
+      <img id="scanCleanImg" src="assets/scan-clean.webp" alt="Khiên xanh và checklist toàn dấu tick: ví sạch, không có approval rủi ro" data-i18n-alt="scanCleanAlt" class="illustration scan-art" loading="lazy" style="display:none">
+      <img id="scanFlagsImg" src="assets/scan-flags.webp" alt="Kính lúp soi một dòng approval bị khoanh đỏ" data-i18n-alt="scanFlagsAlt" class="illustration scan-art" loading="lazy" style="display:none">
+      <img id="emptyStateImg" src="assets/empty-state.webp" alt="Hộp rỗng mở ra với kính lúp và dấu hỏi thân thiện: chưa có dữ liệu approval" data-i18n-alt="emptyStateAlt" class="illustration scan-art" loading="lazy" style="display:none">
+      <ul id="approvalList" class="approval-list"></ul>
+      <p id="scanEmpty" class="muted" data-i18n="scanEmpty">Chưa có kết quả quét.</p>
+    </div>
+  </section>
+
+  <!-- ============ PROFILE ============ -->
+  <section id="profileView" class="view">
+    <div class="card">
+      <h2 data-i18n="profileTitle">Hồ sơ của bạn</h2>
+      <img src="assets/report-card.webp" alt="Thẻ báo cáo kiểm toán với đồng hồ điểm, con dấu và huy chương" data-i18n-alt="reportCardAlt" class="illustration" loading="lazy">
+      <div id="profileNotice"></div>
+      <p><strong id="profileHandle">—</strong></p>
+      <p><span data-i18n="profileVerified">Điểm đã xác nhận:</span> <strong id="profileScore">—</strong></p>
+      <p><span data-i18n="profileEstimated">Điểm tạm tính:</span> <strong id="profileEstimated">—</strong></p>
+      <p><span data-i18n="profileBadge">Badge:</span> <span id="profileBadge" class="badge-tier badge-none">—</span></p>
+      <p><button id="attestBtn" class="btn" type="button" data-i18n="requestAttest">Yêu cầu xác nhận điểm</button></p>
+      <h3 data-i18n="scoreHistory">Lịch sử điểm</h3>
+      <ul id="scoreHistory" class="history-list"></ul>
+      <div class="warning" data-i18n="disclaimer">⚠️ Hygiene Score chỉ phản ánh trạng thái approval tại thời điểm quét, dựa trên dữ liệu công khai. Điểm này không phải bảo chứng an toàn tuyệt đối và không phải tư vấn đầu tư.</div>
+    </div>
+  </section>
+
+  <!-- ============ LEADERBOARD ============ -->
+  <section id="leaderboardSection" class="view">
+    <div class="card">
+      <h2 data-i18n="leaderboardTitle">Bảng xếp hạng ví sạch nhất</h2>
+      <p class="muted" data-i18n="leaderboardHint">Chỉ tính điểm đã xác nhận. Hòa điểm thì ví đạt điểm đó sớm hơn xếp trên. Ví chỉ có điểm "tạm tính" không lên bảng. Chỉ hiện tên .ai + điểm, không hiện địa chỉ ví đầy đủ.</p>
+      <img src="assets/podium.webp" alt="Bục vinh danh với huy chương vàng, bạc, đồng" data-i18n-alt="podiumAlt" class="illustration" loading="lazy">
+      <div id="leaderboardNotice"></div>
+      <table>
+        <thead><tr><th>#</th><th data-i18n="colName">Tên .ai</th><th data-i18n="colScore">Điểm</th></tr></thead>
+        <tbody id="leaderboardBody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============ STATS ============ -->
+  <section id="statsSection" class="view">
+    <div class="card">
+      <h2 data-i18n="statsTitle">Thống kê công khai</h2>
+      <img src="assets/dashboard.webp" alt="Bảng điều khiển với biểu đồ cột, đường cong tăng và khiên bảo vệ" data-i18n-alt="dashboardAlt" class="illustration" loading="lazy">
+      <div id="statsNotice"></div>
+      <div class="stat-grid">
+        <div class="stat"><div class="num" id="statAgents">—</div><div class="lbl" data-i18n="statAgents">Agent ID đã quét</div></div>
+        <div class="stat"><div class="num" id="statApprovals">—</div><div class="lbl" data-i18n="statApprovals">Approval đã quét</div></div>
+        <div class="stat"><div class="num" id="statRevokes">—</div><div class="lbl" data-i18n="statRevokes">Lần revoke đã xác nhận</div></div>
+      </div>
+      <h3 data-i18n="scoreDistribution">Phân bố điểm theo band</h3>
+      <table>
+        <thead><tr><th data-i18n="colBand">Band điểm</th><th data-i18n="colCount">Số ví</th></tr></thead>
+        <tbody id="bandBody">
+          <tr><td>0–49</td><td data-band="0-49">—</td></tr>
+          <tr><td>50–69 (Bronze)</td><td data-band="50-69">—</td></tr>
+          <tr><td>70–89 (Silver)</td><td data-band="70-89">—</td></tr>
+          <tr><td>90–100 (Gold)</td><td data-band="90-100">—</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <p data-i18n="footer">AgentAllowance — dự án dự thi Agent ID Hackathon. Kỳ tính điểm 18/11–09/12/2026 08:00 UTC. Owner: Safe 2-of-3 (dùng lại Safe SafeStreak). Owner chỉ có quyền setVerifier / setBadge / pause — không mint, không thuế, không đóng băng, không rút tiền, không proxy, không selfdestruct. Contract không nhận BNB.</p>
+</footer>
+</body>
+</html>

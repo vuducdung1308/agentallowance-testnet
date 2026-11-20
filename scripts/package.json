@@ -1,0 +1,1 @@
+{"dependencies":{"ethers":"^6.13.0"},"description":"Script doc event AgentAllowance: dem Agent ID duy nhat, leaderboard (ethers v6)","name":"agentallowance-scripts","private":true,"scripts":{"count":"node countAgentIds.mjs","leaderboard":"node leaderboard.mjs"},"type":"module","version":"0.1.0"}
