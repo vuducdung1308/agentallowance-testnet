@@ -23,6 +23,7 @@ export const FLAG_POINTS = {
 // Topic của event Approval(address,address,uint256) và Transfer(address,address,uint256).
 export const APPROVAL_TOPIC = ethers.id("Approval(address,address,uint256)");
 export const TRANSFER_TOPIC = ethers.id("Transfer(address,address,uint256)");
+export const SCORE_ATTESTED_TOPIC = ethers.id("ScoreAttested(address,uint256,uint64,uint64,address)");
 export const BSCSCAN_API_URL = "https://api.bscscan.com/api";
 
 // --- Công thức điểm (SPEC §4.4) ---
@@ -101,7 +102,7 @@ export function buildFlagsForPair({
 
 // --- Đọc event ---
 
-function padTopic(address) {
+export function padTopic(address) {
   return ethers.zeroPadValue(ethers.getAddress(address), 32);
 }
 
@@ -176,6 +177,76 @@ async function rpcGetLogsBackwards(provider, topics) {
     const boundary = await provider.getBlock(lastFrom);
     if (!boundary || boundary.timestamp < PERIOD_START) break;
     toBlock = lastFrom - 1;
+  }
+  return logs;
+}
+
+// --- Đọc log trong kỳ cho leaderboard / thống kê (SPEC §6, §10) ---
+// Khác với rpcGetLogsBackwards (dừng theo timestamp của chunk), hàm này xác định
+// CHÍNH XÁC block đầu tiên của kỳ bằng tìm nhị phân (~20 lần getBlock, cache
+// lại vì PERIOD_START là hằng số), rồi đi ngược theo chunk song song từ latest
+// xuống đúng block đó. Nhờ vậy số liệu "trong kỳ" không lẫn event trước kỳ.
+// Dùng cho: ScoreAttested (leaderboard, band, lịch sử 1 ví) và Approval toàn
+// chain (tổng approval / tổng revoke trong kỳ). Không động vào đường quét
+// /scan (rpcGetLogsBackwards giữ nguyên).
+const firstBlockCache = new Map();
+async function firstBlockAtOrAfter(provider, timestamp) {
+  if (firstBlockCache.has(timestamp)) return firstBlockCache.get(timestamp);
+  const latest = await provider.getBlockNumber();
+  const genesis = await provider.getBlock(0);
+  if (genesis && genesis.timestamp >= timestamp) {
+    firstBlockCache.set(timestamp, 0);
+    return 0;
+  }
+  let lo = 0;
+  let hi = latest;
+  while (lo + 1 < hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const b = await provider.getBlock(mid);
+    if (!b) {
+      hi = mid;
+      continue;
+    }
+    if (b.timestamp >= timestamp) hi = mid;
+    else lo = mid;
+  }
+  firstBlockCache.set(timestamp, hi);
+  return hi;
+}
+
+// topics: mảng topics cho eth_getLogs; address: lọc theo contract (tùy chọn).
+// Trả về log thô (ethers Log) trong [block đầu kỳ, latest], mới -> cũ không
+// đảm bảo thứ tự — bên gọi tự sắp xếp theo (blockNumber, logIndex) khi cần.
+export async function getPeriodLogs(provider, { topics, address }) {
+  const minBlock = await firstBlockAtOrAfter(provider, PERIOD_START);
+  const latest = await provider.getBlockNumber();
+  const logs = [];
+  let toBlock = latest;
+  while (toBlock >= minBlock) {
+    const batch = [];
+    let cursor = toBlock;
+    for (let i = 0; i < SCAN_CONCURRENCY; i++) {
+      const fromBlock = Math.max(cursor - 1999, minBlock);
+      batch.push({ fromBlock, toBlock: cursor });
+      if (fromBlock <= minBlock) {
+        cursor = minBlock - 1;
+        break;
+      }
+      cursor = fromBlock - 1;
+    }
+    const results = await Promise.all(
+      batch.map((c) =>
+        provider.getLogs({
+          ...(address ? { address } : {}),
+          fromBlock: c.fromBlock,
+          toBlock: c.toBlock,
+          topics,
+        }),
+      ),
+    );
+    for (const r of results) logs.push(...r);
+    if (cursor < minBlock) break;
+    toBlock = cursor;
   }
   return logs;
 }

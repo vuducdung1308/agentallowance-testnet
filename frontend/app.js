@@ -562,16 +562,34 @@ async function loadProfile() {
       badgeEl.className = "badge-tier " + (tier === 3 ? "badge-gold" : tier === 2 ? "badge-silver" : tier === 1 ? "badge-bronze" : "badge-none");
     }
     if (historyEl) {
-      const filter = c.filters.ScoreAttested(currentAccount);
-      const events = await c.queryFilter(filter);
-      if (!events.length) {
-        historyEl.innerHTML = "<li>" + esc(t("noScoreHistory")) + "</li>";
+      // Ưu tiên verifier: public RPC chặn eth_getLogs nên tự đọc log sẽ lỗi
+      // (đây là nguyên nhân banner "Quét thất bại" ở tab Hồ sơ ngày 21/11).
+      if (!isTbd(CONFIG.verifierUrl)) {
+        const res = await fetch(CONFIG.verifierUrl.replace(/\/$/, "") + "/history?agent=" + encodeURIComponent(currentAccount));
+        if (!res.ok) throw new Error("verifier " + res.status);
+        const data = await res.json();
+        const items = Array.isArray(data.history) ? data.history : [];
+        if (!items.length) {
+          historyEl.innerHTML = "<li>" + esc(t("noScoreHistory")) + "</li>";
+        } else {
+          historyEl.innerHTML = items.map((it) =>
+            "<li>" + esc(String(Number(it.score))) + " / 100 — " +
+            esc(new Date(Number(it.periodEnd || 0) * 1000).toLocaleDateString(lang === "vi" ? "vi-VN" : "en-GB")) +
+            "</li>"
+          ).join("");
+        }
       } else {
-        historyEl.innerHTML = events.slice().reverse().map((ev) =>
-          "<li>" + esc(String(Number(ev.args.score))) + " / 100 — " +
-          esc(new Date(Number(ev.args.periodEnd || 0) * 1000).toLocaleDateString(lang === "vi" ? "vi-VN" : "en-GB")) +
-          "</li>"
-        ).join("");
+        const filter = c.filters.ScoreAttested(currentAccount);
+        const events = await c.queryFilter(filter);
+        if (!events.length) {
+          historyEl.innerHTML = "<li>" + esc(t("noScoreHistory")) + "</li>";
+        } else {
+          historyEl.innerHTML = events.slice().reverse().map((ev) =>
+            "<li>" + esc(String(Number(ev.args.score))) + " / 100 — " +
+            esc(new Date(Number(ev.args.periodEnd || 0) * 1000).toLocaleDateString(lang === "vi" ? "vi-VN" : "en-GB")) +
+            "</li>"
+          ).join("");
+        }
       }
     }
     showNotice(noticeEl, "");
@@ -598,6 +616,24 @@ async function loadLeaderboard() {
   }
   body.innerHTML = '<tr><td colspan="3">' + esc(t("loading")) + "</td></tr>";
   try {
+    // Ưu tiên verifier (SPEC §10): public RPC chặn eth_getLogs nên tự đọc
+    // event ScoreAttested sẽ lỗi; verifier có RPC đọc được log nên trả sẵn.
+    if (!isTbd(CONFIG.verifierUrl)) {
+      const res = await fetch(CONFIG.verifierUrl.replace(/\/$/, "") + "/leaderboard");
+      if (!res.ok) throw new Error("verifier " + res.status);
+      const data = await res.json();
+      const rows = Array.isArray(data.rows) ? data.rows : [];
+      if (!rows.length) {
+        body.innerHTML = '<tr><td colspan="3">' + esc(t("noLeaderboard")) + "</td></tr>";
+        showNotice(noticeEl, "");
+        return;
+      }
+      body.innerHTML = rows.map((r, i) =>
+        "<tr><td>" + (i + 1) + "</td><td>" + esc(r.handle || shortAddress(r.agent)) + "</td><td>" + Number(r.score) + "</td></tr>"
+      ).join("");
+      showNotice(noticeEl, "");
+      return;
+    }
     const c = await getAgentAllowanceRead();
     const provider = getReadProvider();
     const events = await c.queryFilter(c.filters.ScoreAttested());
@@ -649,6 +685,26 @@ async function loadStats() {
     return;
   }
   try {
+    // Ưu tiên verifier (SPEC §10): trả sẵn totalAgents, tổng approval/revoke
+    // và phân bố band. Hai ô approval/revoke trước đây chưa từng được điền
+    // (không có code nào set chúng) nên luôn hiện "—".
+    if (!isTbd(CONFIG.verifierUrl)) {
+      const res = await fetch(CONFIG.verifierUrl.replace(/\/$/, "") + "/leaderboard");
+      if (!res.ok) throw new Error("verifier " + res.status);
+      const data = await res.json();
+      const setNum = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = String(v); };
+      setNum("statAgents", Number(data.totalAgents ?? 0));
+      setNum("homeAgents", Number(data.totalAgents ?? 0));
+      setNum("statApprovals", Number(data.approvals ?? 0));
+      setNum("homeApprovals", Number(data.approvals ?? 0));
+      setNum("statRevokes", Number(data.revokes ?? 0));
+      setNum("homeRevokes", Number(data.revokes ?? 0));
+      document.querySelectorAll("[data-band]").forEach((el) => {
+        el.textContent = String((data.bands || {})[el.getAttribute("data-band")] ?? 0);
+      });
+      showNotice(noticeEl, "");
+      return;
+    }
     const c = await getAgentAllowanceRead();
     const total = await c.totalAgents();
     const setNum = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = String(v); };

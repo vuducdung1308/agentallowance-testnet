@@ -7,9 +7,13 @@ import express from "express";
 import { ethers } from "ethers";
 import {
   AGENT_ID_ADDRESS,
+  APPROVAL_TOPIC,
   CHAIN_ID,
   PERIOD_END,
   PERIOD_START,
+  SCORE_ATTESTED_TOPIC,
+  getPeriodLogs,
+  padTopic,
   scanApprovals,
 } from "./score.js";
 
@@ -44,8 +48,12 @@ if (VERIFIER_PRIVATE_KEY) {
 const AGENT_ALLOWANCE_MIN_ABI = [
   "function nonces(address agent) view returns (uint256)",
   "function verifier() view returns (address)",
+  "function totalAgents() view returns (uint256)",
 ];
-const AGENT_ID_MIN_ABI = ["function balanceOf(address account) view returns (uint256)"];
+const AGENT_ID_MIN_ABI = [
+  "function balanceOf(address account) view returns (uint256)",
+  "function handleOf(address account) view returns (string)",
+];
 
 function agentAllowanceContract() {
   if (!provider || !AGENT_ALLOWANCE_ADDRESS) return null;
@@ -71,6 +79,178 @@ const SCORE_TYPES = {
     { name: "deadline", type: "uint64" },
   ],
 };
+
+// --- Leaderboard / thống kê / lịch sử (SPEC §6, §10) ---
+// Frontend KHÔNG tự đọc log được: public BSC RPC chặn eth_getLogs, nên
+// leaderboard + stats + lịch sử điểm trên trang luôn trống (lỗi 21/11).
+// Verifier có RPC đọc được log nên đếm thay: đọc event ScoreAttested và
+// Approval trong kỳ rồi trả JSON cho frontend. Cache ngắn 120 giây vì đọc
+// log toàn kỳ tốn vài chục giây trên mainnet cuối kỳ.
+const SCORE_ATTESTED_IFACE = new ethers.Interface([
+  "event ScoreAttested(address indexed agent, uint256 score, uint64 periodStart, uint64 periodEnd, address verifier)",
+]);
+
+function shortAddress(addr) {
+  const a = String(addr || "");
+  return a.length > 10 ? a.slice(0, 6) + "..." + a.slice(-4) : a;
+}
+
+async function blockTimestamps(provider, blockNumbers) {
+  const uniq = [...new Set(blockNumbers.map(Number))];
+  const map = new Map();
+  await Promise.all(
+    uniq.map(async (n) => {
+      try {
+        const b = await provider.getBlock(n);
+        if (b) map.set(n, Number(b.timestamp));
+      } catch {
+        // Không lấy được timestamp thì dùng blockNumber làm thứ tự thời gian.
+      }
+    }),
+  );
+  return map;
+}
+
+const LEADERBOARD_TTL_MS = 120_000;
+let leaderboardCache = { at: 0, data: null };
+const historyCache = new Map(); // agent (lowercase) -> { at, data }
+
+async function computeLeaderboard() {
+  const now = Date.now();
+  if (leaderboardCache.data && now - leaderboardCache.at < LEADERBOARD_TTL_MS) {
+    return leaderboardCache.data;
+  }
+  if (!provider || !AGENT_ALLOWANCE_ADDRESS) {
+    throw new Error("Verifier chưa cấu hình RPC_URL / AGENT_ALLOWANCE_ADDRESS");
+  }
+  const contract = agentAllowanceContract();
+  const [totalAgents, attestedLogs, approvalLogs] = await Promise.all([
+    contract.totalAgents(),
+    getPeriodLogs(provider, { topics: [SCORE_ATTESTED_TOPIC], address: AGENT_ALLOWANCE_ADDRESS }),
+    getPeriodLogs(provider, { topics: [APPROVAL_TOPIC] }),
+  ]);
+
+  // Điểm mới nhất mỗi ví (theo blockNumber, logIndex) + attestedAt từ timestamp block.
+  const decoded = attestedLogs
+    .map((log) => {
+      try {
+        const parsed = SCORE_ATTESTED_IFACE.parseLog(log);
+        return {
+          agent: ethers.getAddress(parsed.args.agent),
+          score: Number(parsed.args.score),
+          periodStart: Number(parsed.args.periodStart),
+          periodEnd: Number(parsed.args.periodEnd),
+          blockNumber: Number(log.blockNumber),
+          logIndex: Number(log.logIndex),
+        };
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.blockNumber - b.blockNumber || a.logIndex - b.logIndex);
+  const tsMap = await blockTimestamps(provider, decoded.map((d) => d.blockNumber));
+  const latest = new Map();
+  for (const d of decoded) {
+    const attestedAt = tsMap.get(d.blockNumber) ?? d.blockNumber;
+    latest.set(d.agent, { ...d, attestedAt });
+  }
+  const rows = [...latest.values()].sort((a, b) => b.score - a.score || a.attestedAt - b.attestedAt);
+
+  // Tên .ai mỗi ví (đọc handleOf trên contract Agent ID; lỗi thì dùng địa chỉ rút gọn).
+  const agentId = new ethers.Contract(AGENT_ID, AGENT_ID_MIN_ABI, provider);
+  const handles = await Promise.all(
+    rows.map(async (r) => {
+      try {
+        const h = await agentId.handleOf(r.agent);
+        return h || shortAddress(r.agent);
+      } catch {
+        return shortAddress(r.agent);
+      }
+    }),
+  );
+  rows.forEach((r, i) => {
+    r.handle = handles[i];
+  });
+
+  const bands = { "0-49": 0, "50-69": 0, "70-89": 0, "90-100": 0 };
+  for (const r of rows) {
+    if (r.score < 50) bands["0-49"]++;
+    else if (r.score < 70) bands["50-69"]++;
+    else if (r.score < 90) bands["70-89"]++;
+    else bands["90-100"]++;
+  }
+
+  // Tổng approval / revoke trong kỳ: đếm event Approval toàn chain.
+  // value > 0 = cấp approval; value == 0 = revoke (approve(spender, 0)).
+  // Log không chuẩn (data không phải uint256 32 byte) thì bỏ qua, không đếm.
+  let approvals = 0;
+  let revokes = 0;
+  for (const log of approvalLogs) {
+    if (typeof log.data !== "string" || log.data.length !== 66) continue;
+    if (BigInt(log.data) === 0n) revokes++;
+    else approvals++;
+  }
+
+  const data = {
+    totalAgents: Number(totalAgents),
+    approvals,
+    revokes,
+    bands,
+    rows: rows.map((r) => ({
+      agent: r.agent,
+      handle: r.handle,
+      score: r.score,
+      attestedAt: r.attestedAt,
+      blockNumber: r.blockNumber,
+    })),
+    updatedAt: Math.floor(now / 1000),
+  };
+  leaderboardCache = { at: now, data };
+  return data;
+}
+
+async function computeHistory(agent) {
+  const key = agent.toLowerCase();
+  const now = Date.now();
+  const cached = historyCache.get(key);
+  if (cached && now - cached.at < LEADERBOARD_TTL_MS) return cached.data;
+  if (!provider || !AGENT_ALLOWANCE_ADDRESS) {
+    throw new Error("Verifier chưa cấu hình RPC_URL / AGENT_ALLOWANCE_ADDRESS");
+  }
+  const logs = await getPeriodLogs(provider, {
+    topics: [SCORE_ATTESTED_TOPIC, padTopic(agent)],
+    address: AGENT_ALLOWANCE_ADDRESS,
+  });
+  const decoded = logs
+    .map((log) => {
+      try {
+        const parsed = SCORE_ATTESTED_IFACE.parseLog(log);
+        return {
+          score: Number(parsed.args.score),
+          periodStart: Number(parsed.args.periodStart),
+          periodEnd: Number(parsed.args.periodEnd),
+          blockNumber: Number(log.blockNumber),
+          logIndex: Number(log.logIndex),
+        };
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.blockNumber - a.blockNumber || b.logIndex - a.logIndex);
+  const tsMap = await blockTimestamps(provider, decoded.map((d) => d.blockNumber));
+  const history = decoded.map((d) => ({
+    score: d.score,
+    periodStart: d.periodStart,
+    periodEnd: d.periodEnd,
+    attestedAt: tsMap.get(d.blockNumber) ?? d.blockNumber,
+    blockNumber: d.blockNumber,
+  }));
+  const data = { agent: ethers.getAddress(agent), history, updatedAt: Math.floor(now / 1000) };
+  historyCache.set(key, { at: now, data });
+  return data;
+}
 
 const app = express();
 app.use(express.json({ limit: "100kb" }));
@@ -177,6 +357,33 @@ app.post("/score/attest", async (req, res) => {
   } catch (e) {
     console.error("POST /score/attest lỗi:", e);
     return res.status(500).json({ error: `Ký attestation thất bại: ${e.message}` });
+  }
+});
+
+// --- GET /leaderboard ---
+// Trả toàn bộ số liệu cho trang Bảng xếp hạng + Thống kê:
+// { totalAgents, approvals, revokes, bands, rows: [{agent, handle, score, attestedAt, blockNumber}], updatedAt }.
+app.get("/leaderboard", async (_req, res) => {
+  try {
+    return res.json(await computeLeaderboard());
+  } catch (e) {
+    console.error("GET /leaderboard lỗi:", e);
+    return res.status(500).json({ error: `Không lấy được leaderboard: ${e.message}` });
+  }
+});
+
+// --- GET /history?agent=0x... ---
+// Lịch sử điểm đã xác nhận của 1 ví (mới nhất trước), cho tab Hồ sơ.
+app.get("/history", async (req, res) => {
+  const agent = req.query.agent;
+  if (!agent || !ethers.isAddress(agent)) {
+    return res.status(400).json({ error: "Thiếu hoặc sai địa chỉ agent (?agent=0x...)" });
+  }
+  try {
+    return res.json(await computeHistory(agent));
+  } catch (e) {
+    console.error("GET /history lỗi:", e);
+    return res.status(500).json({ error: `Không lấy được lịch sử điểm: ${e.message}` });
   }
 });
 
