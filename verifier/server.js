@@ -75,6 +75,20 @@ const SCORE_TYPES = {
 const app = express();
 app.use(express.json({ limit: "100kb" }));
 
+// --- CORS: frontend chạy trên GitHub Pages (origin khác) gọi /scan và
+// /score/attest từ trình duyệt, nên mọi response phải có
+// Access-Control-Allow-Origin. Không có header này, trình duyệt chặn response
+// dù server trả 200 (lỗi đã gặp 21/11: quét trên trang luôn báo thất bại
+// trong khi curl trực tiếp vẫn 200). API này chỉ đọc dữ liệu công khai và ký
+// theo yêu cầu, không dùng cookie hay credential, nên "*" là đủ và an toàn.
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
+
 // --- GET /health ---
 app.get("/health", async (_req, res) => {
   let rpcReady = false;
