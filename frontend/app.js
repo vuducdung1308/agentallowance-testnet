@@ -735,6 +735,10 @@ document.addEventListener("DOMContentLoaded", () => {
       currentAccount = accs && accs.length ? accs[0] : null;
       if (currentAccount) connectWallet();
     });
+    // Đổi mạng trong ví -> tải lại trang để kiểm tra lại chain và xoá banner
+    // sai chain cũ (trước đây không có listener này nên banner bị kẹt dù ví đã
+    // chuyển sang đúng chain, phải tải lại trang bằng tay mới hết).
+    window.ethereum.on("chainChanged", () => window.location.reload());
   }
   if (typeof ethers === "undefined") setStatus(t("scanFailed"), "error");
 });

@@ -142,17 +142,40 @@ async function bscscanGetLogs({ fromBlock, toBlock, topic0, topic1, apiKey }) {
 // RPC: đọc log theo chunk, đi ngược từ block mới nhất cho tới khi block timestamp < PERIOD_START.
 // Dùng khi không có BscScan API key (public BSC RPC có thể từ chối eth_getLogs —
 // khi đó cần RPC đọc được log như Ankr / NodeReal, xem README).
+// CHẠY SONG SONG theo đợt (CONCURRENCY chunk/đợt) thay vì tuần tự từng chunk:
+// tập chunk và điều kiện dừng GIỐNG HỆT bản tuần tự (neo từ latest, bước 2000,
+// dừng ở chunk đầu tiên có fromBlock timestamp < PERIOD_START, chunk đó vẫn được lấy),
+// nên kết quả quét không đổi — chỉ nhanh hơn. Trước đây quét testnet mất ~97 giây
+// (tuần tự ~170 lệnh gọi); song song còn ~10–15 giây, mainnet 21 ngày còn dưới ~60 giây
+// thay vì ~10 phút, đủ nhanh để không bị rớt request giữa đường (~100 giây).
+const SCAN_CONCURRENCY = 8;
 async function rpcGetLogsBackwards(provider, topics) {
   const latest = await provider.getBlockNumber();
   const logs = [];
   let toBlock = latest;
   for (;;) {
-    const fromBlock = Math.max(toBlock - 1999, 0);
-    const chunk = await provider.getLogs({ fromBlock, toBlock, topics });
-    logs.push(...chunk);
-    const boundary = await provider.getBlock(fromBlock);
-    if (!boundary || boundary.timestamp < PERIOD_START || fromBlock === 0) break;
-    toBlock = fromBlock - 1;
+    // Gom tối đa SCAN_CONCURRENCY chunk liên tiếp (mới -> cũ) rồi gọi song song.
+    const batch = [];
+    let cursor = toBlock;
+    for (let i = 0; i < SCAN_CONCURRENCY; i++) {
+      const fromBlock = Math.max(cursor - 1999, 0);
+      batch.push({ fromBlock, toBlock: cursor });
+      if (fromBlock === 0) {
+        cursor = -1;
+        break;
+      }
+      cursor = fromBlock - 1;
+    }
+    const results = await Promise.all(
+      batch.map((c) => provider.getLogs({ fromBlock: c.fromBlock, toBlock: c.toBlock, topics })),
+    );
+    for (const r of results) logs.push(...r);
+    const lastFrom = batch[batch.length - 1].fromBlock;
+    if (lastFrom === 0 || cursor === -1) break;
+    // Điều kiện dừng như bản tuần tự: chunk cũ nhất của đợt chạm PERIOD_START.
+    const boundary = await provider.getBlock(lastFrom);
+    if (!boundary || boundary.timestamp < PERIOD_START) break;
+    toBlock = lastFrom - 1;
   }
   return logs;
 }
@@ -238,7 +261,6 @@ export async function scanApprovals(agent, { provider, bscscanApiKey }) {
   const agentAddr = ethers.getAddress(agent);
   const now = Math.floor(Date.now() / 1000);
   const verifiedCache = new Map();
-  const blockTsCache = new Map();
 
   let approvalLogs;
   let transferLogs;
@@ -275,18 +297,22 @@ export async function scanApprovals(agent, { provider, bscscanApiKey }) {
   }
 
   // Fallback RPC: eth_getLogs chia chunk (cần RPC đọc được log).
-  approvalLogs = await rpcGetLogsBackwards(provider, [APPROVAL_TOPIC, padTopic(agentAddr)]);
-  transferLogs = await rpcGetLogsBackwards(provider, [TRANSFER_TOPIC, padTopic(agentAddr)]);
-  const getTimestamp = async (log) => {
-    const bn = Number(log.blockNumber);
-    if (!blockTsCache.has(bn)) {
+  // Hai lượt quét (Approval + Transfer) độc lập nhau -> chạy song song.
+  [approvalLogs, transferLogs] = await Promise.all([
+    rpcGetLogsBackwards(provider, [APPROVAL_TOPIC, padTopic(agentAddr)]),
+    rpcGetLogsBackwards(provider, [TRANSFER_TOPIC, padTopic(agentAddr)]),
+  ]);
+  // groupPairEvents cần timestamp đồng bộ -> resolve trước, song song theo block riêng biệt.
+  const allLogs = [...approvalLogs, ...transferLogs];
+  const distinctBns = [...new Set(allLogs.map((l) => Number(l.blockNumber)))];
+  const tsByBn = new Map();
+  await Promise.all(
+    distinctBns.map(async (bn) => {
       const b = await provider.getBlock(bn);
-      blockTsCache.set(bn, b ? b.timestamp : 0);
-    }
-    return blockTsCache.get(bn);
-  };
-  // groupPairEvents cần timestamp đồng bộ -> resolve trước.
-  for (const log of [...approvalLogs, ...transferLogs]) log._timestamp = await getTimestamp(log);
+      tsByBn.set(bn, b ? b.timestamp : 0);
+    }),
+  );
+  for (const log of allLogs) log._timestamp = tsByBn.get(Number(log.blockNumber));
   const pairs = groupPairEvents(approvalLogs, transferLogs, (l) => l._timestamp);
   return buildScanResult(agentAddr, pairs, { provider, bscscanApiKey, verifiedCache, now });
 }
